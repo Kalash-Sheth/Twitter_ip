@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase, supabaseConfigured, type TickerRow, type AutoTweetRow } from "../../lib/supabaseBrowser";
+import { supabase, supabaseConfigured, type TickerRow, type AutoTweetRow, type EngineStatusRow } from "../../lib/supabaseBrowser";
 
 const CAT_COLOR: Record<string, string> = {
   Markets: "#1d9bf0",
@@ -23,6 +23,7 @@ const CATS = ["All", "Markets", "Indian Economy", "Business", "Finance"] as cons
 export default function TickerPage() {
   const [rows, setRows] = useState<TickerRow[]>([]);
   const [tweets, setTweets] = useState<AutoTweetRow[]>([]);
+  const [groqStatus, setGroqStatus] = useState<EngineStatusRow | null>(null);
   const [live, setLive] = useState(false);
   const [filter, setFilter] = useState<(typeof CATS)[number]>("All");
 
@@ -31,7 +32,7 @@ export default function TickerPage() {
     let alive = true;
 
     async function load() {
-      const [{ data: articles }, { data: picks }] = await Promise.all([
+      const [{ data: articles }, { data: picks }, { data: status }] = await Promise.all([
         supabase!
           .from("ticker_items")
           .select("id, publisher, category, title, link, published_at, ingested_at")
@@ -39,13 +40,15 @@ export default function TickerPage() {
           .limit(200),
         supabase!
           .from("auto_tweets")
-          .select("id, topic_key, headline, tweet_text, source_publisher, source_link, source_category, impact_score, x_tweet_id, posted_at")
+          .select("id, topic_key, headline, tweet_text, source_title, source_publisher, source_link, source_category, impact_score, x_tweet_id, posted_at")
           .order("posted_at", { ascending: false })
           .limit(60),
+        supabase!.from("engine_status").select("id, status, message, updated_at").eq("id", "groq_llm").maybeSingle(),
       ]);
       if (!alive) return;
       if (articles) setRows(articles as TickerRow[]);
       if (picks) setTweets(picks as AutoTweetRow[]);
+      setGroqStatus((status as EngineStatusRow | null) ?? null);
     }
 
     load();
@@ -53,6 +56,7 @@ export default function TickerPage() {
       .channel("ticker")
       .on("postgres_changes", { event: "*", schema: "public", table: "ticker_items" }, () => load())
       .on("postgres_changes", { event: "*", schema: "public", table: "auto_tweets" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "engine_status" }, () => load())
       .subscribe((s) => setLive(s === "SUBSCRIBED"));
     const safety = setInterval(load, 5_000);
     return () => {
@@ -89,6 +93,14 @@ export default function TickerPage() {
           <span className="pulse" /> {live ? "LIVE" : "CONNECTING"}
         </span>
       </header>
+
+      {groqStatus && groqStatus.status !== "ok" && (
+        <div className={`status-banner ${groqStatus.status}`}>
+          ⚠ Groq API {groqStatus.status === "down" ? "issue" : "rate limited"}
+          {groqStatus.message ? ` — ${groqStatus.message}` : ""}
+          <span className="status-banner-time"> · since {timeAgo(groqStatus.updated_at)} ago</span>
+        </div>
+      )}
 
       <div className="chips" style={{ marginBottom: 14 }}>
         {CATS.map((c) => (
@@ -154,6 +166,11 @@ export default function TickerPage() {
                   <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--faint)" }}>{timeAgo(t.posted_at)}</span>
                 </div>
                 <p className="body" style={{ fontSize: 13.5 }}>{t.tweet_text}</p>
+                {t.source_title && (
+                  <div className="tweet-source-ref">
+                    from: <span title="Reference only — this article is already removed from the ticker and won't be reused">{t.source_title}</span>
+                  </div>
+                )}
                 {t.source_link && (
                   <a className="news-link" href={t.source_link} target="_blank" rel="noreferrer">
                     source{t.source_publisher ? ` · ${t.source_publisher}` : ""} ↗

@@ -205,6 +205,9 @@ create table if not exists auto_tweets (
   topic_key         text not null,                          -- short slug, e.g. "reliance-q1-results" — dedup signal
   headline          text not null,                          -- same as tweet_text today; kept separate for future re-rendering
   tweet_text        text not null,
+  source_title      text,                                   -- the ORIGINAL scraped article title — reference only,
+                                                              -- never re-used as a candidate (it's already deleted
+                                                              -- from ticker_items by the time this row is written)
   source_publisher  text,
   source_link       text,
   source_category   text,
@@ -212,6 +215,9 @@ create table if not exists auto_tweets (
   x_tweet_id        text,                                   -- id returned by X on success; null in dry-run
   posted_at         timestamptz not null default now()
 );
+
+-- for auto_tweets tables created before source_title existed
+alter table auto_tweets add column if not exists source_title text;
 
 create index if not exists idx_auto_tweets_posted on auto_tweets (posted_at desc);
 
@@ -221,4 +227,25 @@ create policy read_auto_tweets on auto_tweets for select using (true);
 
 do $$ begin
   alter publication supabase_realtime add table auto_tweets;
+exception when duplicate_object then null; end $$;
+
+-- ============================================================================
+--  ENGINE_STATUS  —  single-row-per-service health signal. Right now just
+--  tracks the Groq LLM call the AutoTweet worker depends on, so the frontend
+--  can surface a banner ONLY when something's actually wrong (rate limited,
+--  down, erroring) — hidden entirely when status = 'ok'.
+-- ============================================================================
+create table if not exists engine_status (
+  id          text primary key,                              -- e.g. 'groq_llm'
+  status      text not null default 'ok',                     -- 'ok' | 'degraded' | 'down'
+  message     text,
+  updated_at  timestamptz not null default now()
+);
+
+alter table engine_status enable row level security;
+drop policy if exists read_engine_status on engine_status;
+create policy read_engine_status on engine_status for select using (true);
+
+do $$ begin
+  alter publication supabase_realtime add table engine_status;
 exception when duplicate_object then null; end $$;

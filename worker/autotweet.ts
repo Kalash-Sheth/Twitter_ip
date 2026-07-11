@@ -31,6 +31,7 @@ import { tooSimilar } from "../lib/tweetDedup";
 import { pruneAutoTweets } from "../lib/prune";
 import { RetryableError } from "../lib/errors";
 import { isActiveNow } from "../lib/activeHours";
+import { reportEngineStatus } from "../lib/engineStatus";
 
 const POLL_MS = Number(process.env.AUTOTWEET_POLL_MS ?? 7 * 60_000);
 const QUIET_CHECK_MS = 60_000; // how often to re-check for the active window during quiet hours
@@ -133,6 +134,7 @@ async function tick(): Promise<void> {
   const callsUsed = llmCallsLast24h();
   if (callsUsed >= LLM_DAILY_CALL_BUDGET) {
     log(`tick: LLM daily budget reached (${callsUsed}/${LLM_DAILY_CALL_BUDGET}) — skipping, batch kept for later`);
+    await reportEngineStatus("groq_llm", "degraded", `Daily LLM call budget reached (${callsUsed}/${LLM_DAILY_CALL_BUDGET}) — paused until it rolls off`);
     return;
   }
 
@@ -145,6 +147,7 @@ async function tick(): Promise<void> {
       recent.map((r) => r.topic_key).filter(Boolean),
     );
     consecutiveFailures = 0;
+    await reportEngineStatus("groq_llm", "ok", null);
 
     if (pick.pick_index == null || pick.impact_score < MIN_SCORE) {
       log(`tick: no post-worthy pick from ${rows.length} articles (${pick.reason || "below bar"})`);
@@ -173,6 +176,7 @@ async function tick(): Promise<void> {
             topic_key: pick.topic_key,
             headline: tweetText,
             tweet_text: tweetText,
+            source_title: chosen.title,
             source_publisher: chosen.publisher,
             source_link: chosen.link,
             source_category: chosen.category,
@@ -191,8 +195,14 @@ async function tick(): Promise<void> {
       intelBackoffUntil = Date.now() + backoffMs;
       clearBatch = false; // transient — retry the SAME batch next cycle instead of losing it
       log(`tick: LLM transient/rate-limit — backing off ${Math.round(backoffMs / 1000)}s (failure #${consecutiveFailures}); batch kept for retry`);
+      await reportEngineStatus(
+        "groq_llm",
+        "degraded",
+        `${err.message} — backing off ${Math.round(backoffMs / 1000)}s (failure #${consecutiveFailures})`,
+      );
     } else {
       log("tick: LLM error, clearing batch —", err instanceof Error ? err.message : err);
+      await reportEngineStatus("groq_llm", "down", err instanceof Error ? err.message : String(err));
     }
   }
 

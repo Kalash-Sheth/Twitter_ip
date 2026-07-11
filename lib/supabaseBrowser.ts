@@ -42,10 +42,18 @@ export interface AutoTweetRow {
   topic_key: string;
   headline: string;
   tweet_text: string;
+  source_title: string | null;
   source_publisher: string | null;
   source_link: string | null;
   source_category: string | null;
   impact_score: number | null;
   x_tweet_id: string | null;
   posted_at: string;
+}
+
+export interface EngineStatusRow {
+  id: string;
+  status: "ok" | "degraded" | "down";
+  message: string | null;
+  updated_at: string;
 }

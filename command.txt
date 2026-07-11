@@ -1,0 +1,6 @@
+Useful commands going forward (all via ssh -i ~/Downloads/ssh-key-2026-07-10.key ubuntu@80.225.192.85):
+
+pm2 logs ticker / pm2 logs autotweet — live logs
+pm2 status — check they're up
+pm2 restart ticker autotweet — restart after a code update
+To deploy new code: cd ~/twitter-ip && git pull && npm install && pm2 restart ticker autotweet
