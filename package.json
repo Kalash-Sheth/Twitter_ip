@@ -1,0 +1,37 @@
+{
+  "name": "twitter-ip",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fastest Indian market news automation — BSE/NSE filings → editorial → X, plus a real-time raw news Ticker (RSS + ET/MC/India Today scraping). One Next.js app + workers sharing the same lib/.",
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "worker": "tsx watch worker/orchestrator.ts",
+    "worker:start": "tsx worker/orchestrator.ts",
+    "ticker": "tsx watch worker/ticker.ts",
+    "ticker:start": "tsx worker/ticker.ts",
+    "ticker:check": "tsx scripts/ticker-check.ts",
+    "autotweet": "tsx watch worker/autotweet.ts",
+    "autotweet:start": "tsx worker/autotweet.ts",
+    "scrape:check": "tsx scripts/news-check.ts",
+    "post:test": "tsx scripts/post-test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "unpdf": "^1.6.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
