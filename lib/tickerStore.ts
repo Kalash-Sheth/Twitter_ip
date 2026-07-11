@@ -10,6 +10,7 @@
  */
 import { db } from "./db";
 import type { TickerItem } from "./tickerRss";
+import { filterUnseen } from "./seenLinks";
 
 const CHUNK_SIZE = 50;
 
@@ -18,18 +19,24 @@ export async function storeTickerItems(items: TickerItem[]): Promise<number> {
   // Collapse same-link duplicates within this batch (e.g. the same article
   // showing up via both an RSS feed and the scraper), keeping the first occurrence.
   const seen = new Set<string>();
-  const rows = [];
+  const deduped = [];
   for (const i of items) {
     if (seen.has(i.link)) continue;
     seen.add(i.link);
-    rows.push({
-      publisher: i.publisher,
-      category: i.category,
-      title: i.title,
-      link: i.link,
-      published_at: i.published_at,
-    });
+    deduped.push(i);
   }
+
+  // Drop anything AutoTweet has already analyzed — ticker_items rows get
+  // deleted right after analysis, so an upsert alone can't tell "never seen"
+  // apart from "already handled, and the source is still listing it."
+  const fresh = await filterUnseen(deduped);
+  const rows = fresh.map((i) => ({
+    publisher: i.publisher,
+    category: i.category,
+    title: i.title,
+    link: i.link,
+    published_at: i.published_at,
+  }));
 
   // Chunked — the first tick after a cold start can carry ~700 rows (16 feeds x
   // ~50 items, nothing stored yet); one huge upsert is more failure-prone than a

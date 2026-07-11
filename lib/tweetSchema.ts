@@ -13,6 +13,13 @@ export const TweetPickSchema = z.object({
       "1-based index of the chosen article from the numbered list, or null if nothing is genuinely " +
         "tweet-worthy or every strong candidate just repeats an already-covered topic.",
     ),
+  chosen_title: z
+    .string()
+    .describe(
+      "Copy the EXACT title text of the picked article, word-for-word from its line in the numbered " +
+        "list (not paraphrased) — used to verify pick_index actually points at the right article. " +
+        "Empty string if pick_index is null.",
+    ),
   topic_key: z
     .string()
     .describe(

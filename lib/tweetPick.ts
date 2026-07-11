@@ -75,9 +75,15 @@ since March.
 
 #Sensex #Nifty #TCS"
 
+CRITICAL — pick_index and chosen_title MUST refer to the SAME article. Before answering, re-count
+the numbered list to find the article you actually mean, then copy its title EXACTLY (word-for-word,
+not paraphrased) into "chosen_title" — this is how the system verifies pick_index is correct, so a
+mismatch between them means your whole answer gets discarded.
+
 Respond with ONE JSON object and nothing else, exactly this shape:
 {
   "pick_index": number | null,
+  "chosen_title": string,    // EXACT copy of the picked article's title from the list — must match pick_index
   "topic_key": string,
   "tweet_text": string,      // see the exact 3-line shape above — CAPS headline / body / hashtags
   "impact_score": number,   // 0-100, how good this pick is RELATIVE TO THE REST OF THIS BATCH
@@ -143,6 +149,7 @@ function normalize(raw: Record<string, unknown>): unknown {
   const score = Math.round(Number(raw.impact_score));
   return {
     pick_index: pickIndex !== null && Number.isFinite(pickIndex) ? pickIndex : null,
+    chosen_title: String(raw.chosen_title ?? ""),
     topic_key: String(raw.topic_key ?? ""),
     tweet_text: stripLinks(String(raw.tweet_text ?? "")).slice(0, 280),
     impact_score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0,

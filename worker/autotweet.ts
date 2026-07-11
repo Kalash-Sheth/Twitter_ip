@@ -8,9 +8,18 @@
  *   3. posts the pick (respects the same X kill-switch/dry-run as the other
  *      engines — see lib/poster.ts) and logs it to auto_tweets for dedup
  *      context in future cycles
- *   4. deletes the WHOLE batch it just analyzed (whether or not it posted),
- *      so the next run only ever sees fresh articles — Ticker keeps filling
- *      ticker_items independently in the background
+ *   4. deletes the WHOLE batch it just analyzed (whether or not it posted)
+ *      AND records every one of those links in seen_links (lib/seenLinks.ts)
+ *      so Ticker never re-stores them even if the source keeps listing them
+ *      on a later poll — without this, a deleted-then-re-scraped article
+ *      would look brand new again and could be analyzed/posted a second time
+ *
+ * The LLM's numeric pick_index isn't blindly trusted — it's cross-checked
+ * against chosen_title (the model's own verbatim copy of the article it
+ * meant to pick). A known failure mode of open models is the index and the
+ * composed tweet_text quietly drifting apart; when that happens, the real
+ * article is recovered by matching chosen_title's text against the
+ * candidate list instead of trusting the index (see resolveChosen()).
  *
  * Duplicate protection is two-layered: the LLM is shown recent topic_keys and
  * told not to repeat them, and a plain word-overlap check (lib/tweetDedup.ts)
@@ -27,8 +36,10 @@ import "dotenv/config";
 import { db } from "../lib/db";
 import { getPoster } from "../lib/poster";
 import { pickBestTweet, type CandidateArticle } from "../lib/tweetPick";
-import { tooSimilar } from "../lib/tweetDedup";
+import type { TweetPick } from "../lib/tweetSchema";
+import { tooSimilar, jaccardSimilarity } from "../lib/tweetDedup";
 import { pruneAutoTweets } from "../lib/prune";
+import { markLinksSeen, pruneSeenLinks } from "../lib/seenLinks";
 import { RetryableError } from "../lib/errors";
 import { isActiveNow } from "../lib/activeHours";
 import { reportEngineStatus } from "../lib/engineStatus";
@@ -43,6 +54,13 @@ const RETAIN = Number(process.env.AUTOTWEET_RETAIN ?? 500);
 const MIN_SCORE = Number(process.env.AUTO_TWEET_MIN_SCORE ?? 20);
 const DEDUP_LOOKBACK_MIN = Number(process.env.AUTO_TWEET_DEDUP_LOOKBACK_MIN ?? 240);
 const DEDUP_JACCARD = Number(process.env.AUTO_TWEET_DEDUP_JACCARD ?? 0.5);
+// How closely candidates[pick_index-1].title must match the LLM's own
+// chosen_title before we trust pick_index; below this we search all
+// candidates for whichever one chosen_title actually describes.
+const GROUNDING_JACCARD = Number(process.env.AUTO_TWEET_GROUNDING_JACCARD ?? 0.5);
+// Rolling window for "already analyzed" links (lib/seenLinks.ts) — sources
+// don't re-list month-old articles, so a short retention is plenty.
+const SEEN_LINKS_RETAIN_DAYS = Number(process.env.SEEN_LINKS_RETAIN_DAYS ?? 7);
 // Cap what's sent to the LLM in one call — keeps a single request small (and
 // under Groq free-tier's tokens-per-minute limit) even after a long backlog
 // (e.g. the worker was down a while). Normal 7-min cadence rarely gets close
@@ -104,6 +122,42 @@ async function deleteBatch(ids: string[]): Promise<void> {
   }
 }
 
+const normalizeTitle = (s: string): string => s.trim().toLowerCase().replace(/\s+/g, " ");
+
+/**
+ * The LLM's pick_index isn't always trustworthy on its own — a numbered-list
+ * pick and separately-composed tweet_text can drift apart (a known failure
+ * mode of open models), which silently posts a tweet about one article while
+ * crediting a different one. chosen_title is the LLM's own verbatim copy of
+ * the article it MEANT to pick; when it disagrees with pick_index, trust
+ * chosen_title and recover the real candidate by matching text instead of
+ * blindly trusting the index.
+ */
+function resolveChosen(
+  pick: TweetPick,
+  candidates: CandidateArticle[],
+): { chosen: CandidateArticle; recovered: boolean } | null {
+  if (pick.pick_index == null) return null;
+  const indexed = candidates[pick.pick_index - 1];
+  const wantTitle = normalizeTitle(pick.chosen_title);
+
+  if (indexed && wantTitle && normalizeTitle(indexed.title) === wantTitle) {
+    return { chosen: indexed, recovered: false };
+  }
+
+  if (!wantTitle) return null;
+  let best: CandidateArticle | null = null;
+  let bestScore = 0;
+  for (const c of candidates) {
+    const score = jaccardSimilarity(c.title, pick.chosen_title);
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best && bestScore >= GROUNDING_JACCARD ? { chosen: best, recovered: true } : null;
+}
+
 async function tick(): Promise<void> {
   const { data: rows, error } = await db
     .from("ticker_items")
@@ -152,10 +206,14 @@ async function tick(): Promise<void> {
     if (pick.pick_index == null || pick.impact_score < MIN_SCORE) {
       log(`tick: no post-worthy pick from ${rows.length} articles (${pick.reason || "below bar"})`);
     } else {
-      const chosen = candidates[pick.pick_index - 1];
-      if (!chosen) {
-        log(`tick: LLM picked an out-of-range index (${pick.pick_index}/${candidates.length}) — discarding pick`);
+      const resolved = resolveChosen(pick, candidates);
+      if (!resolved) {
+        log(`tick: pick_index/chosen_title mismatch, no confident match — discarding (wanted "${pick.chosen_title.slice(0, 60)}")`);
       } else {
+        const { chosen, recovered } = resolved;
+        if (recovered) {
+          log(`tick: pick_index pointed at the wrong article — recovered the real one via title match: "${chosen.title.slice(0, 60)}"`);
+        }
         const dupByKey = recent.some((r) => r.topic_key && r.topic_key === pick.topic_key);
         const dupByText = recent.some((r) => tooSimilar(pick.tweet_text, r.headline, DEDUP_JACCARD));
         if (dupByKey || dupByText) {
@@ -206,8 +264,16 @@ async function tick(): Promise<void> {
     }
   }
 
-  if (clearBatch) await deleteBatch(ids);
+  if (clearBatch) {
+    const links = rows.map((r) => r.link as string);
+    await deleteBatch(ids);
+    // Record every analyzed link (not just the picked one) — the WHOLE batch
+    // was "used", so none of it should ever be treated as fresh again even if
+    // the source keeps listing it on a later poll.
+    await markLinksSeen(links);
+  }
   await pruneAutoTweets(RETAIN);
+  await pruneSeenLinks(SEEN_LINKS_RETAIN_DAYS);
 }
 
 let stopping = false;

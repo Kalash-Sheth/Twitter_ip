@@ -249,3 +249,18 @@ create policy read_engine_status on engine_status for select using (true);
 do $$ begin
   alter publication supabase_realtime add table engine_status;
 exception when duplicate_object then null; end $$;
+
+-- ============================================================================
+--  SEEN_LINKS  —  persistent memory of links AutoTweet has already analyzed.
+--  ticker_items rows are deleted right after analysis, so without this a
+--  source that keeps listing the same article on a later poll (normal
+--  RSS/scrape behavior) would have it silently re-inserted as if brand new.
+--  Rolling window (pruned in worker/autotweet.ts) — sources don't re-list
+--  month-old articles, so a short retention is plenty.
+-- ============================================================================
+create table if not exists seen_links (
+  link     text primary key,
+  seen_at  timestamptz not null default now()
+);
+
+create index if not exists idx_seen_links_seen_at on seen_links (seen_at);
