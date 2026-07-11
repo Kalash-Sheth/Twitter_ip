@@ -264,3 +264,10 @@ create table if not exists seen_links (
 );
 
 create index if not exists idx_seen_links_seen_at on seen_links (seen_at);
+
+-- No public read/write policy on purpose (unlike every other table here) —
+-- nothing in the frontend ever needs this table, and it's itself a security
+-- control: if anon/authenticated could DELETE from it, that would silently
+-- undo the "never re-analyze this link" guarantee. Default-deny for both;
+-- workers keep full access since the service-role key bypasses RLS entirely.
+alter table seen_links enable row level security;
