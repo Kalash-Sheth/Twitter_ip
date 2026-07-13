@@ -8,11 +8,11 @@
 import "dotenv/config";
 import { TweetPickSchema, type TweetPick } from "./tweetSchema";
 import { RetryableError } from "./errors";
+import { currentGroqKey, rotateGroqKeyNow } from "./groqKeyRotation";
 
 const BASE = (process.env.LLM_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const URL = `${BASE}/chat/completions`;
 const MODEL = process.env.LLM_MODEL ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
-const KEY = process.env.LLM_API_KEY ?? process.env.GROQ_API_KEY;
 const TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
 // Titles only (no body text) — keeps one call cheap even with 50-100 candidates.
 const MAX_TITLE_CHARS = 160;
@@ -102,8 +102,9 @@ function buildUserText(candidates: CandidateArticle[], recentTopics: string[]): 
 }
 
 async function callLLM(userText: string): Promise<unknown> {
+  const key = currentGroqKey(); // re-checked every call — reflects the latest rotation
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (KEY) headers.Authorization = `Bearer ${KEY}`;
+  if (key) headers.Authorization = `Bearer ${key}`;
 
   let res: Response;
   try {
@@ -124,7 +125,11 @@ async function callLLM(userText: string): Promise<unknown> {
   } catch (e) {
     throw new RetryableError(`LLM network: ${e instanceof Error ? e.message : String(e)}`);
   }
-  if (res.status === 429 || res.status >= 500) throw new RetryableError(`LLM transient ${res.status}`);
+  if (res.status === 429) {
+    rotateGroqKeyNow("429 rate limited"); // swap keys immediately, don't wait for the timer
+    throw new RetryableError(`LLM transient ${res.status}`);
+  }
+  if (res.status >= 500) throw new RetryableError(`LLM transient ${res.status}`);
   if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
   const content = json.choices?.[0]?.message?.content;
