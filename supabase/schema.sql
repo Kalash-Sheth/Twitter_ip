@@ -251,12 +251,19 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 
 -- ============================================================================
---  SEEN_LINKS  —  persistent memory of links AutoTweet has already analyzed.
---  ticker_items rows are deleted right after analysis, so without this a
---  source that keeps listing the same article on a later poll (normal
---  RSS/scrape behavior) would have it silently re-inserted as if brand new.
---  Rolling window (pruned in worker/autotweet.ts) — sources don't re-list
---  month-old articles, so a short retention is plenty.
+--  SEEN_LINKS  —  persistent memory of every link that has ever left
+--  ticker_items. Rows there are deleted after AutoTweet analyzes them, by
+--  Ticker's own retention pruning, or by hand (e.g. cleaning up the Supabase
+--  table editor) — without this, a source that still lists that article on a
+--  later poll (completely normal RSS/scrape behavior) would have it silently
+--  re-inserted as if brand new. Rolling window (pruned in worker/autotweet.ts)
+--  — sources don't re-list month-old articles, so a short retention is plenty.
+--
+--  Enforced with a trigger (below), not application code, specifically so it
+--  applies no matter HOW a row is deleted — automated batch-clear, retention
+--  pruning, or a manual delete in the Supabase dashboard all go through the
+--  same table, so a database-level trigger is the one place that sees all of
+--  them; app code only sees the paths it explicitly calls.
 -- ============================================================================
 create table if not exists seen_links (
   link     text primary key,
@@ -271,3 +278,16 @@ create index if not exists idx_seen_links_seen_at on seen_links (seen_at);
 -- undo the "never re-analyze this link" guarantee. Default-deny for both;
 -- workers keep full access since the service-role key bypasses RLS entirely.
 alter table seen_links enable row level security;
+
+create or replace function mark_ticker_link_seen() returns trigger as $$
+begin
+  insert into seen_links (link) values (old.link)
+  on conflict (link) do nothing;
+  return old;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_mark_ticker_link_seen on ticker_items;
+create trigger trg_mark_ticker_link_seen
+  after delete on ticker_items
+  for each row execute function mark_ticker_link_seen();

@@ -1,25 +1,16 @@
 /**
- * Persistent memory of links that have ALREADY been through AI analysis
- * (AutoTweet) — independent of ticker_items' current contents, since those
- * rows are deleted right after analysis. Without this, a source that keeps
- * listing the same article across later polls (completely normal RSS/scrape
+ * Persistent memory of links that have already left ticker_items — populated
+ * by a DB trigger on ticker_items (see supabase/schema.sql), which fires on
+ * ANY delete (AutoTweet's batch-clear, Ticker's own retention pruning, or a
+ * manual delete in the Supabase dashboard), not just the paths this file's
+ * callers happen to go through. Without this, a source that keeps listing
+ * the same article across later polls (completely normal RSS/scrape
  * behavior) would have it silently re-inserted as if brand new — Ticker's
  * upsert only dedups against ROWS CURRENTLY IN THE TABLE, not history.
  */
 import { db } from "./db";
 
 const CHUNK_SIZE = 200;
-
-/** Record links as "already analyzed" so they're never treated as fresh again. */
-export async function markLinksSeen(links: string[]): Promise<void> {
-  if (links.length === 0) return;
-  const rows = [...new Set(links)].map((link) => ({ link }));
-  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + CHUNK_SIZE);
-    const { error } = await db.from("seen_links").upsert(chunk, { onConflict: "link", ignoreDuplicates: true });
-    if (error) console.error(`[${new Date().toISOString()}] markLinksSeen failed:`, error.message);
-  }
-}
 
 /** Drop any item whose link has already been analyzed before, however long ago. */
 export async function filterUnseen<T extends { link: string }>(items: T[]): Promise<T[]> {

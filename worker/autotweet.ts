@@ -8,11 +8,12 @@
  *   3. posts the pick (respects the same X kill-switch/dry-run as the other
  *      engines — see lib/poster.ts) and logs it to auto_tweets for dedup
  *      context in future cycles
- *   4. deletes the WHOLE batch it just analyzed (whether or not it posted)
- *      AND records every one of those links in seen_links (lib/seenLinks.ts)
- *      so Ticker never re-stores them even if the source keeps listing them
- *      on a later poll — without this, a deleted-then-re-scraped article
- *      would look brand new again and could be analyzed/posted a second time
+ *   4. deletes the WHOLE batch it just analyzed (whether or not it posted) —
+ *      a DB trigger on ticker_items (supabase/schema.sql) records every
+ *      deleted link in seen_links so Ticker never re-stores it even if the
+ *      source keeps listing it on a later poll. The trigger fires on ANY
+ *      delete, not just this one, so it also covers Ticker's own retention
+ *      pruning and manual cleanup in the Supabase dashboard.
  *
  * The LLM's numeric pick_index isn't blindly trusted — it's cross-checked
  * against chosen_title (the model's own verbatim copy of the article it
@@ -39,7 +40,7 @@ import { pickBestTweet, type CandidateArticle } from "../lib/tweetPick";
 import type { TweetPick } from "../lib/tweetSchema";
 import { tooSimilar, jaccardSimilarity } from "../lib/tweetDedup";
 import { pruneAutoTweets } from "../lib/prune";
-import { markLinksSeen, pruneSeenLinks } from "../lib/seenLinks";
+import { pruneSeenLinks } from "../lib/seenLinks";
 import { RetryableError } from "../lib/errors";
 import { isActiveNow } from "../lib/activeHours";
 import { reportEngineStatus } from "../lib/engineStatus";
@@ -264,14 +265,10 @@ async function tick(): Promise<void> {
     }
   }
 
-  if (clearBatch) {
-    const links = rows.map((r) => r.link as string);
-    await deleteBatch(ids);
-    // Record every analyzed link (not just the picked one) — the WHOLE batch
-    // was "used", so none of it should ever be treated as fresh again even if
-    // the source keeps listing it on a later poll.
-    await markLinksSeen(links);
-  }
+  // seen_links is populated by a DB trigger on ticker_items (any delete —
+  // this batch clear, retention pruning, or a manual dashboard delete — see
+  // supabase/schema.sql), not application code, so it can't be forgotten here.
+  if (clearBatch) await deleteBatch(ids);
   await pruneAutoTweets(RETAIN);
   await pruneSeenLinks(SEEN_LINKS_RETAIN_DAYS);
 }
