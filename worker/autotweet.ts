@@ -22,9 +22,14 @@
  * article is recovered by matching chosen_title's text against the
  * candidate list instead of trusting the index (see resolveChosen()).
  *
- * Duplicate protection is two-layered: the LLM is shown recent topic_keys and
- * told not to repeat them, and a plain word-overlap check (lib/tweetDedup.ts)
- * backstops that in case the model slips.
+ * Duplicate protection is THREE-layered: (1) excludeRecentlyCovered() drops
+ * any candidate whose title near-matches a recently-posted article's title
+ * BEFORE the LLM ever sees the batch — without this, a dominant ongoing
+ * story can keep winning the LLM's pick cycle after cycle, wasting the
+ * whole cycle on a post-hoc rejection even when fresh alternatives were
+ * sitting right there; (2) the LLM is also shown recent topic_keys and told
+ * not to repeat them; (3) a plain word-overlap check (lib/tweetDedup.ts)
+ * backstops both in case the model slips anyway.
  *
  * On a transient LLM failure (rate limit / network), the batch is
  * deliberately NOT deleted — it's retried next cycle instead of losing those
@@ -103,15 +108,34 @@ function llmCallsLast24h(): number {
   return llmCallLog.length;
 }
 
-async function recentTopics(): Promise<{ topic_key: string; headline: string }[]> {
+async function recentTopics(): Promise<{ topic_key: string; headline: string; source_title: string | null }[]> {
   const since = new Date(Date.now() - DEDUP_LOOKBACK_MIN * 60_000).toISOString();
   const { data } = await db
     .from("auto_tweets")
-    .select("topic_key, headline")
+    .select("topic_key, headline, source_title")
     .gte("posted_at", since)
     .order("posted_at", { ascending: false })
     .limit(30);
   return data ?? [];
+}
+
+/**
+ * Drop any candidate whose title is a near-duplicate of a recently-posted
+ * article's ORIGINAL title — BEFORE the LLM ever sees it, not after.
+ * Without this, a dominant ongoing story (e.g. a big market move everyone's
+ * covering) can keep winning the LLM's pick cycle after cycle, getting
+ * rejected as a duplicate post-hoc each time and wasting the whole cycle
+ * even when genuinely fresh, postable articles were sitting right there in
+ * the same batch. Comparing against source_title (a raw scraped headline)
+ * rather than the composed tweet_text is a fairer apples-to-apples match.
+ */
+function excludeRecentlyCovered(
+  candidates: CandidateArticle[],
+  recent: { source_title: string | null }[],
+): CandidateArticle[] {
+  const recentTitles = recent.map((r) => r.source_title).filter((t): t is string => !!t);
+  if (recentTitles.length === 0) return candidates;
+  return candidates.filter((c) => !recentTitles.some((t) => jaccardSimilarity(c.title, t) >= DEDUP_JACCARD));
 }
 
 /** Chunked delete — a single huge IN(...) list can overflow the request limit. */
@@ -196,54 +220,63 @@ async function tick(): Promise<void> {
   let clearBatch = true;
   try {
     const recent = await recentTopics();
-    llmCallLog.push(Date.now());
-    const pick = await pickBestTweet(
-      candidates,
-      recent.map((r) => r.topic_key).filter(Boolean),
-    );
-    consecutiveFailures = 0;
-    await reportEngineStatus("groq_llm", "ok", null);
+    const freshCandidates = excludeRecentlyCovered(candidates, recent);
 
-    if (pick.pick_index == null || pick.impact_score < MIN_SCORE) {
-      log(`tick: no post-worthy pick from ${rows.length} articles (${pick.reason || "below bar"})`);
+    if (freshCandidates.length === 0) {
+      log(`tick: all ${rows.length} article(s) overlap something already posted recently — nothing fresh to analyze`);
     } else {
-      const resolved = resolveChosen(pick, candidates);
-      if (!resolved) {
-        log(`tick: pick_index/chosen_title mismatch, no confident match — discarding (wanted "${pick.chosen_title.slice(0, 60)}")`);
+      if (freshCandidates.length < candidates.length) {
+        log(`tick: excluded ${candidates.length - freshCandidates.length} already-covered article(s) before analysis`);
+      }
+      llmCallLog.push(Date.now());
+      const pick = await pickBestTweet(
+        freshCandidates,
+        recent.map((r) => r.topic_key).filter(Boolean),
+      );
+      consecutiveFailures = 0;
+      await reportEngineStatus("groq_llm", "ok", null);
+
+      if (pick.pick_index == null || pick.impact_score < MIN_SCORE) {
+        log(`tick: no post-worthy pick from ${freshCandidates.length} articles (${pick.reason || "below bar"})`);
       } else {
-        const { chosen, recovered } = resolved;
-        if (recovered) {
-          log(`tick: pick_index pointed at the wrong article — recovered the real one via title match: "${chosen.title.slice(0, 60)}"`);
-        }
-        const dupByKey = recent.some((r) => r.topic_key && r.topic_key === pick.topic_key);
-        const dupByText = recent.some((r) => tooSimilar(pick.tweet_text, r.headline, DEDUP_JACCARD));
-        if (dupByKey || dupByText) {
-          log(`tick: skipping likely-duplicate pick "${chosen.title.slice(0, 60)}" — overlaps a recent post`);
+        const resolved = resolveChosen(pick, freshCandidates);
+        if (!resolved) {
+          log(`tick: pick_index/chosen_title mismatch, no confident match — discarding (wanted "${pick.chosen_title.slice(0, 60)}")`);
         } else {
-          const tweetText = ensureHashtags(pick.tweet_text, chosen.category);
-          let xId: string | null = null;
-          if (poster.mode === "x-live") {
-            try {
-              ({ id: xId } = await poster.post(tweetText));
-            } catch (err) {
-              log(`  ⚠ X delivery failed (${String(err).slice(0, 70)}…)`);
-            }
-          } else {
-            await poster.post(tweetText); // dry-run logs it
+          const { chosen, recovered } = resolved;
+          if (recovered) {
+            log(`tick: pick_index pointed at the wrong article — recovered the real one via title match: "${chosen.title.slice(0, 60)}"`);
           }
-          await db.from("auto_tweets").insert({
-            topic_key: pick.topic_key,
-            headline: tweetText,
-            tweet_text: tweetText,
-            source_title: chosen.title,
-            source_publisher: chosen.publisher,
-            source_link: chosen.link,
-            source_category: chosen.category,
-            impact_score: pick.impact_score,
-            x_tweet_id: xId,
-            posted_at: new Date().toISOString(),
-          });
-          log(`  ▲ ${xId ? "POSTED→X" : "DRY-RUN"} [${pick.impact_score}] ${chosen.publisher}: ${chosen.title.slice(0, 70)}`);
+          const dupByKey = recent.some((r) => r.topic_key && r.topic_key === pick.topic_key);
+          const dupByText = recent.some((r) => tooSimilar(pick.tweet_text, r.headline, DEDUP_JACCARD));
+          if (dupByKey || dupByText) {
+            log(`tick: skipping likely-duplicate pick "${chosen.title.slice(0, 60)}" — overlaps a recent post`);
+          } else {
+            const tweetText = ensureHashtags(pick.tweet_text, chosen.category);
+            let xId: string | null = null;
+            if (poster.mode === "x-live") {
+              try {
+                ({ id: xId } = await poster.post(tweetText));
+              } catch (err) {
+                log(`  ⚠ X delivery failed (${String(err).slice(0, 70)}…)`);
+              }
+            } else {
+              await poster.post(tweetText); // dry-run logs it
+            }
+            await db.from("auto_tweets").insert({
+              topic_key: pick.topic_key,
+              headline: tweetText,
+              tweet_text: tweetText,
+              source_title: chosen.title,
+              source_publisher: chosen.publisher,
+              source_link: chosen.link,
+              source_category: chosen.category,
+              impact_score: pick.impact_score,
+              x_tweet_id: xId,
+              posted_at: new Date().toISOString(),
+            });
+            log(`  ▲ ${xId ? "POSTED→X" : "DRY-RUN"} [${pick.impact_score}] ${chosen.publisher}: ${chosen.title.slice(0, 70)}`);
+          }
         }
       }
     }
