@@ -12,7 +12,7 @@ import { currentGroqKey, rotateGroqKeyNow } from "./groqKeyRotation";
 
 const BASE = (process.env.LLM_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const URL = `${BASE}/chat/completions`;
-const MODEL = process.env.LLM_MODEL ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const MODEL = process.env.LLM_MODEL ?? process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 const TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
 // Titles only (no body text) — keeps one call cheap even with 50-100 candidates.
 const MAX_TITLE_CHARS = 160;

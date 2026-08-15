@@ -18,7 +18,7 @@ import { RetryableError } from "./errors";
 
 const BASE = (process.env.LLM_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const URL = `${BASE}/chat/completions`;
-const MODEL = process.env.LLM_MODEL ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const MODEL = process.env.LLM_MODEL ?? process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 const KEY = process.env.LLM_API_KEY ?? process.env.GROQ_API_KEY; // optional (local needs none)
 const TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS ?? 60_000); // local CPU can be slow
 // Enough to judge accurately (material facts are on page one), while keeping
