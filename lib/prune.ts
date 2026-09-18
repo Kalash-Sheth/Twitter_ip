@@ -1,82 +1,54 @@
 /**
- * Retention — keep only the most recent N announcements; delete the rest so the
- * database stays small (this is a live news feed, not an archive). Cascades to
- * the tweets table via the FK. Called on every orchestrator tick.
+ * Retention — keep only the most recent N rows; delete the rest so the database
+ * stays small (this is a live news feed, not an archive).
+ *
+ * Rows are ordered newest-first by (timestamp, id) so ties break deterministically
+ * — ties are the common case, not an edge case, since every row in one batch
+ * insert shares the same default now(). Only the single BOUNDARY row (the newest
+ * one that must go) is read; everything at or past it in that ordering is then
+ * deleted server-side by predicate, so nothing but a count comes back over the
+ * wire. Reading the whole id list just to slice it client-side was the same
+ * delete, paid for in egress.
  */
 import { db } from "./db";
 
 const DEFAULT_RETAIN = Number(process.env.RETAIN ?? 100);
 
-export async function prune(retain: number = DEFAULT_RETAIN): Promise<number> {
-  // List rows newest-first by (ingested_at, id) so ties are broken
-  // deterministically, then delete everything past the newest `retain` by id.
-  const { data: rows, error: selErr } = await db
-    .from("announcements")
-    .select("id")
-    .order("ingested_at", { ascending: false })
+async function pruneTable(table: string, tsColumn: string, retain: number): Promise<number> {
+  const { data, error: selErr } = await db
+    .from(table)
+    .select(`id, ${tsColumn}`)
+    .order(tsColumn, { ascending: false })
     .order("id", { ascending: false })
-    .limit(10_000);
-  if (selErr) throw new Error(`prune (select) failed: ${selErr.message}`);
+    .range(retain, retain);
+  if (selErr) throw new Error(`prune ${table} (boundary) failed: ${selErr.message}`);
 
-  const old = (rows ?? []).slice(retain).map((r) => r.id);
-  if (old.length === 0) return 0;
+  const boundary = data?.[0] as Record<string, string> | undefined;
+  if (!boundary) return 0; // at or under retention — nothing past the window
 
-  // Delete in chunks — a single huge IN(...) list overflows the request limit.
-  let removed = 0;
-  for (let i = 0; i < old.length; i += 100) {
-    const chunk = old.slice(i, i + 100);
-    const { error: delErr, count } = await db
-      .from("announcements")
-      .delete({ count: "exact" })
-      .in("id", chunk);
-    if (delErr) throw new Error(`prune (delete) failed: ${delErr.message}`);
-    removed += count ?? 0;
-  }
-  return removed;
+  const ts = boundary[tsColumn]!;
+  const older = await db.from(table).delete({ count: "exact" }).lt(tsColumn, ts);
+  if (older.error) throw new Error(`prune ${table} (delete older) failed: ${older.error.message}`);
+
+  // Rows sharing the boundary's exact timestamp are ranked by id, so only those
+  // at or below the boundary id fall outside the window.
+  const tied = await db.from(table).delete({ count: "exact" }).eq(tsColumn, ts).lte("id", boundary.id!);
+  if (tied.error) throw new Error(`prune ${table} (delete tied) failed: ${tied.error.message}`);
+
+  return (older.count ?? 0) + (tied.count ?? 0);
+}
+
+/** Announcements retention. Cascades to the tweets table via the FK. */
+export async function prune(retain: number = DEFAULT_RETAIN): Promise<number> {
+  return pruneTable("announcements", "ingested_at", retain);
 }
 
 /** Same rolling-window retention for the Ticker's raw ticker_items table. */
 export async function pruneTicker(retain: number): Promise<number> {
-  const { data: rows, error: selErr } = await db
-    .from("ticker_items")
-    .select("id")
-    .order("ingested_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(10_000);
-  if (selErr) throw new Error(`pruneTicker (select) failed: ${selErr.message}`);
-
-  const old = (rows ?? []).slice(retain).map((r) => r.id);
-  if (old.length === 0) return 0;
-
-  let removed = 0;
-  for (let i = 0; i < old.length; i += 100) {
-    const chunk = old.slice(i, i + 100);
-    const { error: delErr, count } = await db.from("ticker_items").delete({ count: "exact" }).in("id", chunk);
-    if (delErr) throw new Error(`pruneTicker (delete) failed: ${delErr.message}`);
-    removed += count ?? 0;
-  }
-  return removed;
+  return pruneTable("ticker_items", "ingested_at", retain);
 }
 
 /** Same rolling-window retention for the AutoTweet engine's posting history. */
 export async function pruneAutoTweets(retain: number): Promise<number> {
-  const { data: rows, error: selErr } = await db
-    .from("auto_tweets")
-    .select("id")
-    .order("posted_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(10_000);
-  if (selErr) throw new Error(`pruneAutoTweets (select) failed: ${selErr.message}`);
-
-  const old = (rows ?? []).slice(retain).map((r) => r.id);
-  if (old.length === 0) return 0;
-
-  let removed = 0;
-  for (let i = 0; i < old.length; i += 100) {
-    const chunk = old.slice(i, i + 100);
-    const { error: delErr, count } = await db.from("auto_tweets").delete({ count: "exact" }).in("id", chunk);
-    if (delErr) throw new Error(`pruneAutoTweets (delete) failed: ${delErr.message}`);
-    removed += count ?? 0;
-  }
-  return removed;
+  return pruneTable("auto_tweets", "posted_at", retain);
 }
