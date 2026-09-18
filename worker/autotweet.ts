@@ -218,6 +218,7 @@ async function tick(): Promise<void> {
   }
 
   let clearBatch = true;
+  let posted = false;
   try {
     const recent = await recentTopics();
     const freshCandidates = excludeRecentlyCovered(candidates, recent);
@@ -275,6 +276,7 @@ async function tick(): Promise<void> {
               x_tweet_id: xId,
               posted_at: new Date().toISOString(),
             });
+            posted = true;
             log(`  ▲ ${xId ? "POSTED→X" : "DRY-RUN"} [${pick.impact_score}] ${chosen.publisher}: ${chosen.title.slice(0, 70)}`);
           }
         }
@@ -302,7 +304,8 @@ async function tick(): Promise<void> {
   // this batch clear, retention pruning, or a manual dashboard delete — see
   // supabase/schema.sql), not application code, so it can't be forgotten here.
   if (clearBatch) await deleteBatch(ids);
-  await pruneAutoTweets(RETAIN);
+  // Only a successful post can grow auto_tweets past RETAIN — skip the scan otherwise.
+  if (posted) await pruneAutoTweets(RETAIN);
   await pruneSeenLinks(SEEN_LINKS_RETAIN_DAYS);
 }
 

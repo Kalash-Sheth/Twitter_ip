@@ -60,16 +60,32 @@ export default function Page() {
       }
     }
 
+    // A busy tick can fire several row-change events back to back (one
+    // announcement moves through ingested -> extracted -> drafted -> posted,
+    // each its own event) — coalesce a burst into a single reload instead of
+    // refetching the whole dataset once per event.
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const scheduleLoad = () => {
+      if (debounce) return;
+      debounce = setTimeout(() => {
+        debounce = null;
+        load();
+      }, 1_500);
+    };
+
     load();
     const channel = supabase
       .channel("pipeline")
-      .on("postgres_changes", { event: "*", schema: "public", table: "announcements" }, () => load())
-      .on("postgres_changes", { event: "*", schema: "public", table: "tweets" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "announcements" }, scheduleLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tweets" }, scheduleLoad)
       .subscribe((status) => setLive(status === "SUBSCRIBED"));
-    const safety = setInterval(load, 15_000);
+    // Realtime covers live updates; this is just a fallback for a dropped
+    // channel, so it doesn't need to run nearly as often as the old 15s.
+    const safety = setInterval(load, 60_000);
 
     return () => {
       alive = false;
+      if (debounce) clearTimeout(debounce);
       supabase!.removeChannel(channel);
       clearInterval(safety);
     };

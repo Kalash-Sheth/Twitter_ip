@@ -70,7 +70,7 @@ const INTEL_BACKOFF_MAX_MS = 10 * 60_000;
 // Override with SINCE_ISO=2026-06-28T09:00 to backfill from a specific moment.
 const SINCE = process.env.SINCE_ISO ? Date.parse(process.env.SINCE_ISO) : Date.now();
 
-/** 1-2: fetch BSE, keep only filings newer than SINCE, dedup, store + triage. */
+/** 1-2: fetch BSE, keep only filings newer than SINCE, dedup, store + triage. Returns rows newly stored. */
 async function ingestAndTriage(): Promise<number> {
   const today = new Date();
   let items: Awaited<ReturnType<typeof fetchAnnouncements>> = [];
@@ -102,7 +102,7 @@ async function ingestAndTriage(): Promise<number> {
     `ingest: +${fresh.length} new (${JSON.stringify(bySrc)}, ${routine.length} routine) · ` +
       `newest [${newest.source}] "${newest.company}" lag ${lagS ?? "?"}s`,
   );
-  return fresh.length - routine.length;
+  return fresh.length;
 }
 
 /** 3: extract PDFs for filings awaiting it (BSE via Live/His, NSE via direct URL). */
@@ -242,12 +242,15 @@ async function tick(): Promise<void> {
   // Run stages independently — a transient failure in one (e.g. a dropped
   // Supabase write during ingest) must not stop the others from draining the
   // existing backlog.
+  let stored = 0;
   const stages: [string, () => Promise<unknown>][] = [
-    ["ingest", ingestAndTriage],
+    ["ingest", async () => (stored = await ingestAndTriage())],
     ["extract", extractStage],
     ["intel", intelStage],
     ["distribute", distributeStage],
-    ["prune", () => prune(RETAIN)],
+    // Only ingest can grow the table past RETAIN, so a tick that stored
+    // nothing has nothing to prune — skip prune's table scan.
+    ["prune", () => (stored > 0 ? prune(RETAIN) : Promise.resolve(0))],
   ];
   for (const [name, fn] of stages) {
     try {

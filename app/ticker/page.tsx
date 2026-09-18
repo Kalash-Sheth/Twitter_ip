@@ -51,16 +51,31 @@ export default function TickerPage() {
       setGroqStatus((status as EngineStatusRow | null) ?? null);
     }
 
+    // New articles land in clusters (RSS batches, scraper runs) — coalesce a
+    // burst of row-change events into a single reload instead of refetching
+    // the whole feed once per inserted row.
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const scheduleLoad = () => {
+      if (debounce) return;
+      debounce = setTimeout(() => {
+        debounce = null;
+        load();
+      }, 1_500);
+    };
+
     load();
     const channel = supabase
       .channel("ticker")
-      .on("postgres_changes", { event: "*", schema: "public", table: "ticker_items" }, () => load())
-      .on("postgres_changes", { event: "*", schema: "public", table: "auto_tweets" }, () => load())
-      .on("postgres_changes", { event: "*", schema: "public", table: "engine_status" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "ticker_items" }, scheduleLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "auto_tweets" }, scheduleLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "engine_status" }, scheduleLoad)
       .subscribe((s) => setLive(s === "SUBSCRIBED"));
-    const safety = setInterval(load, 5_000);
+    // Realtime covers live updates; this is just a fallback for a dropped
+    // channel, so it doesn't need to run nearly as often as the old 5s.
+    const safety = setInterval(load, 60_000);
     return () => {
       alive = false;
+      if (debounce) clearTimeout(debounce);
       supabase!.removeChannel(channel);
       clearInterval(safety);
     };

@@ -161,7 +161,9 @@ async function tick(): Promise<void> {
   }
 
   const stored = await storeTickerItems(fresh);
-  await pruneTicker(RETAIN);
+  // Only inserts can push the table past RETAIN, so a tick that stored
+  // nothing has nothing to prune — skip pruneTicker's table scan.
+  if (stored > 0) await pruneTicker(RETAIN);
 
   if (stored > 0 || failed > 0) {
     log(

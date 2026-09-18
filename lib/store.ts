@@ -21,13 +21,25 @@ const timeOf = (a: { announcement_dt: string | null }): number | null => {
 export async function storeNew(items: Announcement[]): Promise<Announcement[]> {
   if (items.length === 0) return [];
 
-  // Existing stories: signature -> list of announcement timestamps.
-  const { data: existing } = await db.from("announcements").select("dedup_key, announcement_dt");
+  // Existing stories: signature -> list of announcement timestamps. Only rows
+  // that could possibly fall within WINDOW_MS of an incoming item can ever
+  // match isDup() below, so narrow the read to that range instead of pulling
+  // every row ever stored — same result, far less transferred as history grows.
+  const incomingTimes = items.map(timeOf).filter((t): t is number => t !== null);
   const byKey = new Map<string, number[]>();
-  for (const r of existing ?? []) {
-    if (!r.dedup_key) continue;
-    const t = timeOf(r);
-    if (t !== null) (byKey.get(r.dedup_key) ?? byKey.set(r.dedup_key, []).get(r.dedup_key)!).push(t);
+  if (incomingTimes.length > 0) {
+    const lo = new Date(Math.min(...incomingTimes) - WINDOW_MS).toISOString();
+    const hi = new Date(Math.max(...incomingTimes) + WINDOW_MS).toISOString();
+    const { data: existing } = await db
+      .from("announcements")
+      .select("dedup_key, announcement_dt")
+      .gte("announcement_dt", lo)
+      .lte("announcement_dt", hi);
+    for (const r of existing ?? []) {
+      if (!r.dedup_key) continue;
+      const t = timeOf(r);
+      if (t !== null) (byKey.get(r.dedup_key) ?? byKey.set(r.dedup_key, []).get(r.dedup_key)!).push(t);
+    }
   }
 
   const isDup = (key: string, t: number | null): boolean => {
